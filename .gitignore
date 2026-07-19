@@ -1,0 +1,25 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+managed_components/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Model artifacts in training dir (keep tflite/ dir artifacts)
+model/training/*.tflite
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
