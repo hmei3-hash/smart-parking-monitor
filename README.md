@@ -14,15 +14,16 @@ the edge — the gateway never does inference.
 ## Architecture
 
 ```
-Sensing Layer ──── 3× ESP32-S3-CAM (on-device INT8 inference)
+Edge Layer ─────── 3× ESP32-S3-CAM
+                   (camera + TFLite INT8 inference + MQTT publish)
        │
-       ├── WiFi / MQTT  (JSON detection results)
+       │  WiFi / MQTT (JSON only)
        ▼
 Gateway Layer ──── Raspberry Pi 5
                    ├── Mosquitto broker
+                   ├── Majority-vote decision fusion
                    ├── SQLite event log
-                   ├── Flask dashboard
-                   └── Majority-vote fusion
+                   └── Flask web dashboard
 ```
 
 ## Current Status
@@ -38,6 +39,21 @@ Gateway Layer ──── Raspberry Pi 5
 | 7 | FreeRTOS task architecture (dual-core, semaphore, queue) | Not started |
 | 8 | Final documentation | Not started |
 
+## Edge AI Model
+
+| Property | Value |
+|----------|-------|
+| Architecture | Custom CNN: 3× Conv2D+MaxPool → GlobalAveragePooling → Dense |
+| Input | 96 × 96 × 3 RGB |
+| Parameters | 6 594 |
+| Quantization | INT8 (TFLite Micro) |
+| Model size | 13.5 KB |
+| Inference time | 4.15 s on ESP32-S3 (reference kernels) |
+| Tensor arena | 103 552 B used (120 KB allocated) |
+| Classes | `empty`, `occupied` |
+
+**ML pipeline:** collect from CAM stream → train in Jupyter → INT8 quantize → export C header → compile into firmware
+
 ## Phase 5 — On-Device Inference
 
 Deployed the INT8 parking-occupancy model onto the ESP32-S3-CAM using
@@ -45,23 +61,48 @@ TFLite Micro. Bringup was blocked by boot loops traced to a board-level
 misconfiguration (incorrect flash size and PSRAM mode for the N16R8
 module), not a memory-exhaustion issue as initially hypothesized.
 
-| Metric             | Value          |
-|--------------------|----------------|
-| Model size (flash) | 13.5 KB        |
-| Tensor arena used  | 103 552 B (120 KB allocated) |
-| Inference latency  | 4.15 s         |
-
 See the full bringup narrative in [docs/phase5-tflite-deployment.md](docs/phase5-tflite-deployment.md).
+
+## Planned FreeRTOS Design
+
+| Core | Task | Role |
+|------|------|------|
+| 0 | Camera capture + TFLite inference | Queue producer |
+| 1 | MQTT publish + status heartbeat (timer) | Queue consumer |
+
+**Synchronization:** FreeRTOS queue for detection results between cores. No shared globals between cores.
+
+## Gateway Features
+
+- **Mosquitto MQTT broker** — central message bus
+- **Majority-vote decision fusion** — 2 of 3 nodes agree = final decision
+- **MQTT Last Will & Testament** — automatic node disconnect detection
+- **SQLite event logging** — persistent occupancy history
+- **Flask web dashboard** — real-time parking status
+- **Timeout alert / violation flagging**
+
+## Hardware BOM
+
+| Component | Qty | Notes |
+|-----------|-----|-------|
+| ESP32-S3-CAM (N16R8) | 3 | Edge inference nodes |
+| Raspberry Pi 5 | 1 | Gateway (Mosquitto, SQLite, Flask) |
+| USB cables | 3 | Power + serial |
+| LED + 220 Ω resistor | 3 | Alarm indicator |
+| Breadboard + jumpers | — | Prototyping |
+
+FSR pressure sensors are deferred to stretch goals.
 
 ## Project Structure
 
 | Folder | Topic | Description |
 |--------|-------|-------------|
 | `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T4) from Phase 5 |
+| `firmware/cam_node/` | CAM node firmware | In development (Phase 6) |
+| `firmware/common/` | Shared constants | Common configuration |
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
-| `gateway_server/` | Gateway server | Mosquitto + Flask dashboard (Phase 6, not yet started) |
+| `gateway/` | Gateway server | Mosquitto + Flask dashboard (Phase 6) |
 | `docs/` | Documentation | Setup guides, deployment notes |
-| `app/` | Application | Dashboard app (future) |
 
 ## Build & Flash
 
@@ -75,15 +116,22 @@ pio run
 pio run --target upload && pio device monitor
 ```
 
-## Hardware
+## Milestones — MVP
 
-| Component | Qty | Notes |
-|-----------|-----|-------|
-| ESP32-S3-CAM (N16R8) | 3 | Edge inference nodes |
-| Raspberry Pi 5 | 1 | Gateway (Mosquitto, SQLite, Flask) |
-| Breadboard, jumpers, LEDs, resistors | — | Prototyping |
+- [x] Single CAM HTTP stream verified
+- [x] MQTT pipeline: ESP32 → Mosquitto → Python subscriber
+- [x] Training data collection
+- [x] CNN training + INT8 quantization
+- [x] Single node edge inference
+- [ ] Three nodes with gateway decision fusion
+- [ ] FreeRTOS dual-core task architecture
 
-FSR pressure sensors are deferred to stretch goals.
+## Stretch Goals
+
+- [ ] Triangular mutual surveillance
+- [ ] FSR pressure sensors
+- [ ] Embedded Linux kernel module on gateway
+- [ ] Session management with timeout enforcement
 
 ## License
 

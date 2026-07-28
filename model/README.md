@@ -108,6 +108,7 @@ model/
 │   ├── collect.py            # Data collection from ESP32-CAM stream
 │   └── test.py               # Stream connectivity test
 ├── tflite/
-│   └── parking_model.tflite  # INT8 quantized model (13.5 KB)
+│   ├── parking_model.tflite  # INT8 quantized model (13.5 KB)
+│   └── parking_model.h       # C array header for ESP32 firmware
 └── README.md
 ```
