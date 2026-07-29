@@ -47,7 +47,7 @@ Gateway Layer ──── Raspberry Pi 5
 | Input | 96 × 96 × 3 RGB |
 | Parameters | 6 594 |
 | Quantization | INT8 (TFLite Micro) |
-| Model size | 13.5 KB |
+| Model size | 13.8 KB |
 | Inference time | 4.15 s on ESP32-S3 (reference kernels) |
 | Tensor arena | 103 552 B used (120 KB allocated) |
 | Classes | `empty`, `occupied` |
@@ -56,12 +56,16 @@ Gateway Layer ──── Raspberry Pi 5
 
 ## Phase 5 — On-Device Inference
 
-Deployed the INT8 parking-occupancy model onto the ESP32-S3-CAM using
-TFLite Micro. Bringup was blocked by boot loops traced to a board-level
-misconfiguration (incorrect flash size and PSRAM mode for the N16R8
-module), not a memory-exhaustion issue as initially hypothesized.
+TFLite Micro deployed on ESP32-S3. 96×96×3 INT8 CNN, 13.8 KB model in flash,
+120 KB tensor arena in SRAM, 4.15 s inference, ~14 s worst-case observation
+latency. Decision logic (temporal debounce, multi-node vote) is deferred to
+the Raspberry Pi gateway; the node publishes raw observations only.
 
-See the full bringup narrative in [docs/phase5-tflite-deployment.md](docs/phase5-tflite-deployment.md).
+Two root causes were found and fixed during bring-up: a board-level
+flash/PSRAM misconfiguration causing a boot loop, and a train/serve brightness
+mismatch causing constant-OCCUPIED output. Neither was in the ML stack. See
+[firmware/bringup/](firmware/bringup/) and
+[docs/phase5-tflite-deployment.md](docs/phase5-tflite-deployment.md).
 
 ## Planned FreeRTOS Design
 
@@ -97,9 +101,7 @@ FSR pressure sensors are deferred to stretch goals.
 
 | Folder | Topic | Description |
 |--------|-------|-------------|
-| `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T4) from Phase 5 |
-| `firmware/cam_node/` | CAM node firmware | In development (Phase 6) |
-| `firmware/common/` | Shared constants | Common configuration |
+| `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T5) from Phase 5 |
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
 | `gateway/` | Gateway server | Mosquitto + Flask dashboard (Phase 6) |
 | `docs/` | Documentation | Setup guides, deployment notes |

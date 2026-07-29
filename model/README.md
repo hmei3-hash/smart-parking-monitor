@@ -58,7 +58,7 @@ a representative dataset (50 training batches).
 
 | Detail                  | Value                          |
 |-------------------------|--------------------------------|
-| Quantized model size    | 13.5 KB                        |
+| Quantized model size    | 13.8 KB                        |
 | Input quantization      | scale = 0.003922, zero_point = −128 |
 | Output quantization     | scale = 0.003906, zero_point = −128 |
 | Input/output dtype      | INT8                           |
@@ -69,33 +69,34 @@ The quantized model is exported both as a `.tflite` file
 
 ---
 
-## Dataset Leakage Finding
+## Known Issues
 
-**Status: accuracy pending re-evaluation on a properly held-out session.**
+### Issue 1 — Train/Validation Leakage
 
-The notebook reports 95.12 % INT8 validation accuracy. This number is
-**not trustworthy** due to dataset leakage. The mechanism:
+The dataset (≈100 occupied / ≈100 empty) was captured in bursts from a
+fixed camera position. The train/val split (`validation_split=0.2,
+seed=42`) partitions individual images at random, not by capture session.
+Near-duplicate frames from the same burst end up in both training and
+validation sets.
 
-1. Images were captured in continuous bursts from the same camera session
-   (fixed viewpoint, lighting, and scene) using `collect.py`.
-2. The train/val split (`validation_split=0.2, seed=42`) partitions
-   individual images at random, not by capture session.
-3. Near-duplicate frames from the same burst end up in both training and
-   validation sets.
-4. Because consecutive frames are nearly identical, the validation set
-   contains images that are visually indistinguishable from training
-   examples, so validation accuracy measures memorization rather than
-   generalization.
+The reported 95.12 % INT8 validation accuracy measured **memorization**
+rather than generalization. True generalization accuracy is **unknown**.
 
-### Corrective Action Needed
+### Issue 2 — Narrow Lighting Distribution
 
-To obtain a trustworthy accuracy figure, the dataset must be re-split so
-that entire capture sessions (not individual frames) are the unit of
-splitting — no frames from a training session should appear in the
-validation or test set. Alternatively, a fully independent test set
-captured on a different day or under different conditions should be used.
+Training images sit at ~144/255 mean brightness. The deployed sensor under
+auto-exposure produced ~64/255, far outside anything the model had seen,
+which saturated the output to constant OCCUPIED (0.996). Worked around
+on-device by fixing exposure manually; the dataset itself still covers only
+one lighting condition.
 
-This re-evaluation has **not yet been performed**.
+### Planned Fix
+
+Recapture through the deployment pipeline (ESP32-S3-EYE, 96×96 RGB565,
+same conversion as the firmware), grouped by capture session with a
+different variable changed per session (lighting, vehicle, angle),
+deduplicated by frame correlation, and split with `GroupShuffleSplit`
+grouped by session. This has not been started.
 
 ---
 
@@ -108,7 +109,7 @@ model/
 │   ├── collect.py            # Data collection from ESP32-CAM stream
 │   └── test.py               # Stream connectivity test
 ├── tflite/
-│   ├── parking_model.tflite  # INT8 quantized model (13.5 KB)
+│   ├── parking_model.tflite  # INT8 quantized model (13.8 KB)
 │   └── parking_model.h       # C array header for ESP32 firmware
 └── README.md
 ```
