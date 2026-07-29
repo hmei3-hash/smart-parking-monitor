@@ -100,6 +100,19 @@ parking/spot{N}/fused      fusion result for the spot
 parking/status/node{M}     node online/offline — retained, set via MQTT Last Will
 ```
 
+### Dashboard Data Contract
+
+`gateway/schema.sql` defines the SQLite persistence layer, and
+`gateway/tools/gen_sample_db.py` generates 12 hours of synthetic history so the
+dashboard can be developed in parallel against a realistic database. The
+dashboard itself is a teammate's scope; this repo defines only the data
+contract. See
+[docs/dashboard_requirements.md](docs/dashboard_requirements.md) for the field
+reference and UI requirements.
+
+`fusion.py` publishes and prints fused results but does not yet write to
+SQLite — wiring the live writes is the next step.
+
 ## Planned FreeRTOS Design
 
 | Core | Task | Role |
