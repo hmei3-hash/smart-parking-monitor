@@ -67,6 +67,22 @@ mismatch causing constant-OCCUPIED output. Neither was in the ML stack. See
 [firmware/bringup/](firmware/bringup/) and
 [docs/phase5-tflite-deployment.md](docs/phase5-tflite-deployment.md).
 
+## Simulated Nodes and Gateway Fusion
+
+Gateway development was decoupled from the still-blocked camera/TFLite
+inference path. `node-sim/` publishes simulated occupancy over MQTT with no
+camera and no inference, which let the broker, the majority-vote fusion, and
+the Last Will node-health path all be built and validated while the inference
+bug remained open.
+
+- **`node-sim/`** — three ESP32-S3 boards, one PlatformIO env each
+  (`pio run -e node1 -t upload`). Ground truth is derived from NTP epoch time
+  so all three nodes agree, then each node flips its own report at a fixed
+  rate to produce genuine 2–1 splits for the gateway to resolve. A
+  single-board variant in `node-sim/variants/` runs the three nodes as three
+  FreeRTOS tasks, used while hardware for three separate boards was
+  unavailable.
+
 ## Planned FreeRTOS Design
 
 | Core | Task | Role |
@@ -103,6 +119,7 @@ FSR pressure sensors are deferred to stretch goals.
 |--------|-------|-------------|
 | `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T5) from Phase 5 |
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
+| `node-sim/` | Simulated nodes | Three MQTT publishers with no inference, for gateway bring-up |
 | `gateway/` | Gateway server | Mosquitto + Flask dashboard (Phase 6) |
 | `docs/` | Documentation | Setup guides, deployment notes |
 
