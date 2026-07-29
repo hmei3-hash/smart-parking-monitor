@@ -1,11 +1,17 @@
 // Filename: main.cpp
 // Author: Hongyi Mei
 // Date: 07/28/2026
-// Description: Bring-up T4 — camera + TFLite Micro integration.
-//              Capture -> RGB565-to-INT8 conversion -> inference -> report.
+// Description: Phase 5 camera node — capture, RGB565-to-INT8 conversion,
+//              and on-device CNN inference for parking occupancy.
 //              Camera frame buffer in PSRAM, tensor arena in internal SRAM.
 //
-// Requires parking_model.h (INT8 model as a C array) alongside this file.
+//              Exposure is fixed manually rather than left to AEC/AGC. The
+//              sensor's auto-exposure produced frames at ~64/255 mean
+//              brightness while the training set sits at ~144/255; that gap
+//              alone was enough to saturate the classifier. See
+//              docs/phase5-tflite-deployment.md.
+//
+// Requires parking_model.h (INT8 model as a C array).
 
 #include <Arduino.h>
 #include "esp_camera.h"
@@ -37,9 +43,28 @@
 
 // ================== Config ====================
 #define IMG_SIZE     96
-#define EXPECTED_LEN (IMG_SIZE * IMG_SIZE * 2)   // RGB565
-#define ARENA_SIZE   (120 * 1024)                // T3 measured 103552 used
+#define EXPECTED_LEN (IMG_SIZE * IMG_SIZE * 2)   // RGB565, 2 bytes/pixel
+#define ARENA_SIZE   (120 * 1024)                // measured 103552 used
 #define INFER_PERIOD 10000                       // ms between inferences
+
+// ---- Exposure ----
+// Tuned so the captured channel mean matches the training distribution.
+// Target: int8 mean ~ +16  (uint8 ~ 144), verified via reportChannelStats().
+// AEC_VALUE is the primary lever; raise AGC_GAIN only if AEC saturates,
+// since gain amplifies sensor noise along with signal.
+#define AEC_VALUE  800    // 0..1200
+#define AGC_GAIN   20     // 0..30
+#define BRIGHTNESS 1      // -2..2
+#define WARMUP_FRAMES 5   // sensor needs a few frames after a manual change
+
+// ---- Diagnostics ----
+// Per-frame channel statistics. Cheap, and the fastest way to spot an
+// exposure or white-balance drift away from the training distribution.
+#define REPORT_CHANNEL_STATS 1
+
+// Hex dump of the exact input tensor every N frames, for host-side
+// reconstruction. ~55 KB per dump at 115200 baud (~5 s). 0 disables.
+#define DUMP_EVERY 0
 
 // ================== TFLite State ====================
 static uint8_t tensor_arena[ARENA_SIZE];
@@ -51,7 +76,9 @@ static uint32_t frame_count = 0;
 
 // ================== Camera Setup ====================
 bool setupCamera() {
-  camera_config_t config = {};   // zero-init: stack garbage crashes init
+  // Zero-init is mandatory: esp_camera_init() reads fields this function
+  // never assigns. Leftover stack garbage in those fields crashes init.
+  camera_config_t config = {};
 
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
@@ -86,7 +113,35 @@ bool setupCamera() {
   }
 
   sensor_t *s = esp_camera_sensor_get();
-  if (s) Serial.printf("Sensor PID: 0x%02x\n", s->id.PID);
+  if (!s) {
+    Serial.println("Sensor handle NULL");
+    return false;
+  }
+  Serial.printf("Sensor PID: 0x%02x\n", s->id.PID);
+
+  // Disable the auto loops before writing manual values, otherwise AEC/AGC
+  // immediately overwrite them.
+  s->set_exposure_ctrl(s, 0);
+  s->set_aec2(s, 0);
+  s->set_gain_ctrl(s, 0);
+
+  s->set_aec_value(s, AEC_VALUE);
+  s->set_agc_gain(s, AGC_GAIN);
+  s->set_brightness(s, BRIGHTNESS);
+
+  s->set_whitebal(s, 1);
+  s->set_awb_gain(s, 1);
+
+  Serial.printf("Exposure: aec=%d agc=%d brightness=%d\n",
+                AEC_VALUE, AGC_GAIN, BRIGHTNESS);
+
+  // Flush stale frames captured under the previous exposure settings.
+  for (int i = 0; i < WARMUP_FRAMES; i++) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) esp_camera_fb_return(fb);
+    delay(100);
+  }
+
   Serial.println("Camera ready");
   return true;
 }
@@ -100,6 +155,7 @@ bool setupModel() {
     return false;
   }
 
+  // This library version predates the 4-argument constructor.
   static tflite::MicroErrorReporter micro_error_reporter;
   static tflite::AllOpsResolver resolver;
   static tflite::MicroInterpreter static_interpreter(
@@ -114,19 +170,53 @@ bool setupModel() {
   input  = interpreter->input(0);
   output = interpreter->output(0);
 
-  // The conversion loop below writes exactly this many bytes. Assert rather
-  // than let a model change turn into a silent buffer overrun.
+  // The conversion loop writes exactly this many bytes. Assert rather than
+  // let a model swap turn into a silent buffer overrun.
   if (input->bytes != IMG_SIZE * IMG_SIZE * 3) {
     Serial.printf("Unexpected input size: %d (expected %d)\n",
                   input->bytes, IMG_SIZE * IMG_SIZE * 3);
     return false;
   }
 
-  Serial.printf("Model ready | arena %d/%d | quant scale %.6f zp %d\n",
-                interpreter->arena_used_bytes(), ARENA_SIZE,
+  Serial.printf("Model ready | arena %d/%d\n",
+                interpreter->arena_used_bytes(), ARENA_SIZE);
+  Serial.printf("  input  quant: scale %.6f, zero_point %d\n",
                 input->params.scale, input->params.zero_point);
+  Serial.printf("  output quant: scale %.6f, zero_point %d\n",
+                output->params.scale, output->params.zero_point);
   return true;
 }
+
+// ================== Diagnostics ====================
+#if REPORT_CHANNEL_STATS
+// Training-set reference is int8 [+16, +24, +15]. A large drift here means
+// the input has left the distribution the model was fitted on, which shows
+// up as a saturated, input-independent prediction.
+static void reportChannelStats() {
+  long sr = 0, sg = 0, sb = 0;
+  for (int i = 0; i < IMG_SIZE * IMG_SIZE; i++) {
+    sr += input->data.int8[i * 3 + 0];
+    sg += input->data.int8[i * 3 + 1];
+    sb += input->data.int8[i * 3 + 2];
+  }
+  int n = IMG_SIZE * IMG_SIZE;
+  Serial.printf("   channel mean (int8): R=%ld G=%ld B=%ld  (train ref +16/+24/+15)\n",
+                sr / n, sg / n, sb / n);
+}
+#endif
+
+#if DUMP_EVERY
+// Emits the tensor shifted back to unsigned so the host can reshape it to
+// (96,96,3) and view it as an image.
+static void dumpInputTensor() {
+  Serial.println("---IMG_START---");
+  for (int i = 0; i < input->bytes; i++) {
+    Serial.printf("%02x", (uint8_t)(input->data.int8[i] + 128));
+    if ((i + 1) % (IMG_SIZE * 3) == 0) Serial.println();
+  }
+  Serial.println("---IMG_END---");
+}
+#endif
 
 // ================== Inference ====================
 void runDetection() {
@@ -144,7 +234,7 @@ void runDetection() {
   }
 
   // ---- RGB565 (little-endian) -> INT8 ----
-  // Quantization is scale = 1/255, zero_point = -128, so the mapping
+  // Input quantization is scale = 1/255, zero_point = -128, so the mapping
   // reduces to (uint8 channel value) - 128.
   unsigned long t_conv = micros();
   int idx = 0;
@@ -162,6 +252,8 @@ void runDetection() {
 
   esp_camera_fb_return(fb);   // release before the multi-second Invoke
 
+  frame_count++;
+
   // ---- Inference ----
   unsigned long t_inf = micros();
   if (interpreter->Invoke() != kTfLiteOk) {
@@ -174,19 +266,32 @@ void runDetection() {
   int8_t occupied_score = output->data.int8[1];
   bool occupied = (occupied_score > empty_score);
 
-  Serial.printf("#%lu [%-8s] empty=%4d occ=%4d | conv %lu us, infer %lu ms | dram=%d psram=%d\n",
-                ++frame_count,
+  // Dequantize: both scores pinned at the INT8 rails is itself a symptom,
+  // and it is not visible from the raw values alone.
+  float s  = output->params.scale;
+  int   zp = output->params.zero_point;
+
+  Serial.printf("#%lu [%-8s] empty=%4d(%.3f) occ=%4d(%.3f) | conv %lu us, infer %lu ms | dram=%d\n",
+                frame_count,
                 occupied ? "OCCUPIED" : "EMPTY",
-                empty_score, occupied_score,
-                t_conv, t_inf / 1000,
-                ESP.getFreeHeap(), ESP.getFreePsram());
+                empty_score,    s * (empty_score - zp),
+                occupied_score, s * (occupied_score - zp),
+                t_conv, t_inf / 1000, ESP.getFreeHeap());
+
+#if REPORT_CHANNEL_STATS
+  reportChannelStats();
+#endif
+
+#if DUMP_EVERY
+  if (frame_count % DUMP_EVERY == 0) dumpInputTensor();
+#endif
 }
 
 // ================== Main ====================
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("\n=== T4: camera + inference ===");
+  Serial.println("\n=== Phase 5: parking node ===");
   Serial.printf("dram=%d psram=%d largest=%d\n",
                 ESP.getFreeHeap(), ESP.getFreePsram(),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
