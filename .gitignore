@@ -3,6 +3,9 @@ build/
 sdkconfig.old
 managed_components/
 
+# PlatformIO build artifacts
+.pio/
+
 # Python
 __pycache__/
 *.pyc
@@ -10,6 +13,11 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# Gateway SQLite databases (regenerable via gateway/tools/gen_sample_db.py)
+*.db
+*.db-wal
+*.db-shm
 
 # Model artifacts in training dir (keep tflite/ dir artifacts)
 model/training/*.tflite

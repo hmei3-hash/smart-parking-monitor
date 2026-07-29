@@ -67,6 +67,52 @@ mismatch causing constant-OCCUPIED output. Neither was in the ML stack. See
 [firmware/bringup/](firmware/bringup/) and
 [docs/phase5-tflite-deployment.md](docs/phase5-tflite-deployment.md).
 
+## Simulated Nodes and Gateway Fusion
+
+Gateway development was decoupled from the still-blocked camera/TFLite
+inference path. `node-sim/` publishes simulated occupancy over MQTT with no
+camera and no inference, which let the broker, the majority-vote fusion, and
+the Last Will node-health path all be built and validated while the inference
+bug remained open.
+
+- **`node-sim/`** — three ESP32-S3 boards, one PlatformIO env each
+  (`pio run -e node1 -t upload`). Ground truth is derived from NTP epoch time
+  so all three nodes agree, then each node flips its own report at a fixed
+  rate to produce genuine 2–1 splits for the gateway to resolve. A
+  single-board variant in `node-sim/variants/` runs the three nodes as three
+  FreeRTOS tasks, used while hardware for three separate boards was
+  unavailable.
+- **`gateway/fusion.py`** — sliding-window majority vote. Keeps each node's
+  latest reading and votes on a fixed interval; readings older than the stale
+  threshold are dropped from the vote, so a dead node degrades the result
+  instead of stalling it. Sliding-window rather than sequence-aligned because
+  real nodes publish on independent timers and never share sequence numbers.
+
+**Measured accuracy: a single node classifies correctly ~85% of the time;
+the three-node majority vote reaches ~94%.** That gain is the reason for the
+multi-node architecture.
+
+### MQTT Topics
+
+```
+parking/spot{N}/node{M}    node occupancy reports (JSON)
+parking/spot{N}/fused      fusion result for the spot
+parking/status/node{M}     node online/offline — retained, set via MQTT Last Will
+```
+
+### Dashboard Data Contract
+
+`gateway/schema.sql` defines the SQLite persistence layer, and
+`gateway/tools/gen_sample_db.py` generates 12 hours of synthetic history so the
+dashboard can be developed in parallel against a realistic database. The
+dashboard itself is a teammate's scope; this repo defines only the data
+contract. See
+[docs/dashboard_requirements.md](docs/dashboard_requirements.md) for the field
+reference and UI requirements.
+
+`fusion.py` publishes and prints fused results but does not yet write to
+SQLite — wiring the live writes is the next step.
+
 ## Planned FreeRTOS Design
 
 | Core | Task | Role |
@@ -103,6 +149,7 @@ FSR pressure sensors are deferred to stretch goals.
 |--------|-------|-------------|
 | `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T5) from Phase 5 |
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
+| `node-sim/` | Simulated nodes | Three MQTT publishers with no inference, for gateway bring-up |
 | `gateway/` | Gateway server | Mosquitto + Flask dashboard (Phase 6) |
 | `docs/` | Documentation | Setup guides, deployment notes |
 
