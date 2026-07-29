@@ -82,6 +82,23 @@ bug remained open.
   single-board variant in `node-sim/variants/` runs the three nodes as three
   FreeRTOS tasks, used while hardware for three separate boards was
   unavailable.
+- **`gateway/fusion.py`** — sliding-window majority vote. Keeps each node's
+  latest reading and votes on a fixed interval; readings older than the stale
+  threshold are dropped from the vote, so a dead node degrades the result
+  instead of stalling it. Sliding-window rather than sequence-aligned because
+  real nodes publish on independent timers and never share sequence numbers.
+
+**Measured accuracy: a single node classifies correctly ~85% of the time;
+the three-node majority vote reaches ~94%.** That gain is the reason for the
+multi-node architecture.
+
+### MQTT Topics
+
+```
+parking/spot{N}/node{M}    node occupancy reports (JSON)
+parking/spot{N}/fused      fusion result for the spot
+parking/status/node{M}     node online/offline — retained, set via MQTT Last Will
+```
 
 ## Planned FreeRTOS Design
 
