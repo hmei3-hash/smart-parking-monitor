@@ -35,9 +35,15 @@ Gateway Layer ──── Raspberry Pi 5
 | 3 | Data collection (205 images: ~100 occupied, ~100 empty) | Complete |
 | 4 | Model training and INT8 quantization | Complete |
 | 5 | [On-device TFLite Micro deployment](docs/phase5-tflite-deployment.md) | Complete |
-| 6 | Three nodes + gateway fusion (MQTT integration, majority vote) | Not started |
+| 6 | [Three nodes + gateway fusion + persistence](docs/phase6-mqtt-integration.md) | Embedded complete; dashboard in development |
 | 7 | FreeRTOS task architecture (dual-core, semaphore, queue) | Not started |
 | 8 | Final documentation | Not started |
+
+Phase 6 runs end to end: three nodes publish inference results over MQTT, the
+gateway votes and writes to SQLite, and parking sessions are derived from the
+fused state. The first full-system run also surfaced publish loss of up to
+39% and correlated node reboots that are not yet resolved — measurements and
+analysis in [docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
 
 ## Edge AI Model
 
@@ -105,13 +111,38 @@ parking/status/node{M}     node online/offline — retained, set via MQTT Last W
 `gateway/schema.sql` defines the SQLite persistence layer, and
 `gateway/tools/gen_sample_db.py` generates 12 hours of synthetic history so the
 dashboard can be developed in parallel against a realistic database. The
-dashboard itself is a teammate's scope; this repo defines only the data
-contract. See
+dashboard itself is a teammate's scope and is in active development; this repo
+defines only the data contract. See
 [docs/dashboard_requirements.md](docs/dashboard_requirements.md) for the field
 reference and UI requirements.
 
-`fusion.py` publishes and prints fused results but does not yet write to
-SQLite — wiring the live writes is the next step.
+`fusion.py` writes live results through `gateway/db.py`, which also derives
+parking sessions from fused state transitions. The database is opened
+read-only from the dashboard side and WAL is enabled, so dashboard reads never
+block gateway writes.
+
+## Phase 6 — Multi-Node Integration
+
+Node firmware in [`firmware/node/`](firmware/node/) merges the Phase 5
+inference path with the MQTT layer proven in `node-sim/`. Three ESP32-S3
+boards, one PlatformIO env each, `NODE_ID` set as a build flag.
+
+An even split in the vote holds the previous state rather than resolving to
+EMPTY. A tie is only reachable with two live nodes, and the demo deliberately
+unplugs one, so it is a normal operating mode — under the old rule a single
+misread on one survivor cut one parking session into two.
+
+The first full-system run worked end to end and produced measurements worth
+more than the passing result: up to 39% publish loss, and node2/node3
+rebooting within 14 seconds of each other after ~18 minutes of uptime, which
+points at shared supply sag rather than firmware. Both are open. Full analysis
+in [docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
+
+Inspect a live or sample database with:
+
+```bash
+python3 gateway/inspect_db.py --watch
+```
 
 ## Planned FreeRTOS Design
 
@@ -147,11 +178,12 @@ FSR pressure sensors are deferred to stretch goals.
 
 | Folder | Topic | Description |
 |--------|-------|-------------|
+| `firmware/node/` | [Node firmware](firmware/node/README.md) | Phase 6 production firmware: capture, inference, MQTT publish |
 | `firmware/bringup/` | [Bringup tests](firmware/bringup/README.md) | Staged isolation tests (T1–T5) from Phase 5 |
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
 | `node-sim/` | Simulated nodes | Three MQTT publishers with no inference, for gateway bring-up |
-| `gateway/` | Gateway server | Mosquitto + Flask dashboard (Phase 6) |
-| `docs/` | Documentation | Setup guides, deployment notes |
+| `gateway/` | [Gateway server](gateway/README.md) | Fusion, SQLite persistence, sample-data generator |
+| `docs/` | Documentation | Setup guides, deployment notes, phase write-ups |
 
 ## Build & Flash
 
@@ -159,10 +191,22 @@ FSR pressure sensors are deferred to stretch goals.
 git clone https://github.com/hmei3-hash/smart-parking-monitor.git
 cd smart-parking-monitor
 
-# Build a bringup test (e.g., T4 camera + inference)
+# Production node firmware (one env per board)
+cd firmware/node
+cp src/secrets.h.example src/secrets.h    # SSID, password, broker IP
+pio run -e node1 -t upload && pio device monitor
+
+# Or a bringup isolation test (e.g. T4 camera + inference)
 cd firmware/bringup/t4_camera_tflite
-pio run
-pio run --target upload && pio device monitor
+pio run -t upload
+```
+
+```bash
+# Gateway, on the Raspberry Pi
+cd gateway
+pip3 install paho-mqtt
+python3 fusion.py                 # subscribes, votes, writes parking.db
+python3 inspect_db.py --watch     # read-only live view, separate shell
 ```
 
 ## Milestones — MVP
@@ -172,7 +216,10 @@ pio run --target upload && pio device monitor
 - [x] Training data collection
 - [x] CNN training + INT8 quantization
 - [x] Single node edge inference
-- [ ] Three nodes with gateway decision fusion
+- [x] Three nodes with gateway decision fusion
+- [x] SQLite persistence and session tracking
+- [ ] Dashboard (teammate — in development)
+- [ ] Resolve node supply stability / publish loss
 - [ ] FreeRTOS dual-core task architecture
 
 ## Stretch Goals
