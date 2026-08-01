@@ -13,12 +13,17 @@ PRAGMA journal_mode = WAL;   -- reader and writer are separate processes
 
 -- ================== Raw node reports ====================
 -- One row per MQTT message from a node. 3 nodes x 1 msg/10s.
+-- ts is gateway receive time, not node time: Phase 6 node firmware has no
+-- RTC and no NTP sync, so a node cannot stamp its own reports. LAN delay is
+-- negligible against the 10 s publish period.
 CREATE TABLE IF NOT EXISTS readings (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     ts        INTEGER NOT NULL,        -- unix epoch, gateway receive time
     spot_id   INTEGER NOT NULL,
     node_id   INTEGER NOT NULL,
-    occupied  INTEGER NOT NULL         -- 0 or 1
+    occupied  INTEGER NOT NULL,        -- 0 or 1
+    seq       INTEGER,                 -- node counter; gaps = lost publishes
+    uptime    INTEGER                  -- node uptime (s); a drop = it rebooted
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_ts   ON readings(ts);
@@ -71,3 +76,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_spot ON sessions(spot_id, started_at);
+
+-- At most one open session per spot. A second open row would mean the
+-- transition logic double-fired; silently accepting it would corrupt the
+-- history the dashboard reads, so let the INSERT fail instead.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_open
+    ON sessions(spot_id) WHERE ended_at IS NULL;
