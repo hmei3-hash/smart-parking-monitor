@@ -1,0 +1,30 @@
+[Unit]
+Description=Smart Parking Dashboard
+# 网关先起来才有库可读。Wants 而非 Requires：网关挂了 dashboard 仍应
+# 可访问并显示「数据过期」，而不是跟着一起停。
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 必须与运行 fusion.py 的用户一致。WAL 模式下读取需要访问 -shm 共享
+# 内存索引，用户不同会报 unable to open database file。
+User=pi
+Group=pi
+
+WorkingDirectory=/home/pi/parking-dashboard
+
+# main.py 用基于 __file__ 的绝对路径找 static/，所以不依赖
+# WorkingDirectory；上面那行保留只是为了日志里路径好认。
+Environment=PARKING_DB=/home/pi/parking/parking.db
+ExecStart=/usr/bin/python3 /home/pi/parking-dashboard/main.py
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
