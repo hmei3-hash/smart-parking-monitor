@@ -17,7 +17,7 @@ h1 { text-align: center; margin-bottom: 24px; font-size: 24px; }
 h2 { font-size: 18px; margin: 24px 0 12px; }
 h3 { font-size: 16px; margin: 20px 0 10px; }
 
-/* 实时状态 */
+/* Live status */
 .realtime-section { text-align: center; margin-bottom: 32px; }
 .duration { font-size: 20px; font-weight: 500; margin-bottom: 12px; color: #555; }
 .spot-box {
@@ -48,7 +48,8 @@ h3 { font-size: 16px; margin: 20px 0 10px; }
 }
 .hidden { display: none; }
 
-/* 平局提示：票数打平时网关保持上一状态，1/2 却显示占用不标出来会像算错 */
+/* Tie indicator. The gateway holds the previous state on a tied vote, so
+   1/2 alongside "occupied" is legitimate; unlabelled it reads as a bug. */
 .tie-hint {
     display: inline-block;
     margin-left: 12px;
@@ -59,13 +60,13 @@ h3 { font-size: 16px; margin: 20px 0 10px; }
     font-size: 13px;
 }
 
-/* 数据过期：表里还有最后一行，但网关已经不再写入 */
+/* Stale data: the last fused row is still present but the gateway stopped writing */
 .spot-box.stale {
     background: #95a5a6;
     border: 4px dashed #7f8c8d;
 }
 
-/* 连接中断横幅。断连时同时会停掉计时器 */
+/* Disconnection banner. The elapsed timer stops at the same time. */
 .conn-banner {
     background: #c0392b;
     color: #fff;
@@ -83,7 +84,7 @@ h3 { font-size: 16px; margin: 20px 0 10px; }
     padding: 16px;
 }
 
-/* 时间轴图例 */
+/* Timeline legend */
 .legend {
     display: flex;
     gap: 18px;
@@ -103,7 +104,7 @@ h3 { font-size: 16px; margin: 20px 0 10px; }
 .sw-idle     { background: #2ecc71; }
 .sw-nodata   { background: #d5d8dc; }
 
-/* 历史时间轴 */
+/* History timeline */
 #timeline {
     width: 100%;
     border: 1px solid #ddd;
@@ -118,7 +119,7 @@ h3 { font-size: 16px; margin: 20px 0 10px; }
     margin-top: 4px;
 }
 
-/* 会话表格 */
+/* Session table */
 table {
     width: 100%;
     border-collapse: collapse;
@@ -133,7 +134,7 @@ th, td {
 th { background: #f8f9fa; font-weight: 600; }
 tr.active-session td { background: #fff5f5; font-weight: 500; }
 
-/* 节点列表 */
+/* Node list */
 .node-list { display: flex; flex-direction: column; gap: 8px; }
 .node-row {
     display: flex;

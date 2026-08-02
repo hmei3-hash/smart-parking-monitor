@@ -1,62 +1,64 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>智能停车监测 Dashboard</title>
+    <title>Smart Parking Monitor</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
-        <h1>车位 A 实时监测</h1>
+        <h1>Spot A — Live Monitor</h1>
 
-        <!-- 连接中断提示。断连时页面会停止走表，避免显示编造的时长 -->
+        <!-- Shown when the API is unreachable. The elapsed timer stops at the
+             same time so the page never displays a fabricated duration. -->
         <div id="conn-banner" class="conn-banner hidden"></div>
 
-        <!-- 实时状态区 -->
+        <!-- Live status -->
         <div class="realtime-section">
             <div id="duration" class="duration">--:--:--</div>
             <div id="spot-box" class="spot-box idle">
-                <span id="spot-text">空闲</span>
+                <span id="spot-text">Vacant</span>
             </div>
             <div class="vote-info">
                 <span id="vote-text">0/3</span>
-                <span id="vote-warning" class="warning hidden">节点异常</span>
-                <!-- 票数打平时网关保持上一状态，会出现 1/2 却显示占用 -->
-                <span id="tie-hint" class="tie-hint hidden">持平 · 维持上一状态</span>
+                <span id="vote-warning" class="warning hidden">Node down</span>
+                <!-- On a tied vote the gateway holds the previous state, so
+                     1/2 alongside "occupied" is legitimate rather than a bug. -->
+                <span id="tie-hint" class="tie-hint hidden">Tied &middot; holding previous state</span>
             </div>
         </div>
 
-        <!-- 历史视图区 -->
+        <!-- History -->
         <div class="history-section">
-            <h2>过去 10 小时占用记录</h2>
+            <h2>Occupancy, past 10 hours</h2>
             <canvas id="timeline" width="900" height="60"></canvas>
             <div class="time-labels">
                 <span id="time-start">--:--</span>
                 <span id="time-end">--:--</span>
             </div>
             <div class="legend">
-                <span><i class="sw sw-occupied"></i>占用</span>
-                <span><i class="sw sw-idle"></i>空闲</span>
-                <span><i class="sw sw-nodata"></i>无数据（网关停机或节点全部离线）</span>
+                <span><i class="sw sw-occupied"></i>Occupied</span>
+                <span><i class="sw sw-idle"></i>Vacant</span>
+                <span><i class="sw sw-nodata"></i>No data (gateway down or all nodes offline)</span>
             </div>
 
-            <h3>停车会话列表</h3>
+            <h3>Parking sessions</h3>
             <table id="session-table">
                 <thead>
                     <tr>
-                        <th>序号</th>
-                        <th>开始时间</th>
-                        <th>结束时间</th>
-                        <th>停车时长</th>
+                        <th>#</th>
+                        <th>Start</th>
+                        <th>End</th>
+                        <th>Duration</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
             </table>
         </div>
 
-        <!-- 节点健康区 -->
+        <!-- Node health -->
         <div class="nodes-section">
-            <h2>节点健康状态</h2>
+            <h2>Node health</h2>
             <div id="node-list" class="node-list"></div>
         </div>
     </div>

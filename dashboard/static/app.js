@@ -1,17 +1,18 @@
-const REFRESH_INTERVAL = 3000;  // 实时状态轮询
-const HISTORY_INTERVAL = 30000; // 历史数据轮询
+const REFRESH_INTERVAL = 3000;  // live status polling
+const HISTORY_INTERVAL = 30000; // history polling
 const HISTORY_HOURS    = 10;
 
-// 已停时长由服务端给出基准值，前端只做本地递增。
-// 记下「收到 elapsed 时的浏览器时刻」，之后用浏览器时钟算增量 ——
-// 增量只跨几秒，不受两台机器时钟偏移影响。绝对值始终来自树莓派。
-let baseElapsed   = null;   // 服务端给的秒数
-let baseLocalMs   = null;   // 收到时的 performance.now()
+// Elapsed time is anchored to a server-supplied value and only incremented
+// locally. We record the browser timestamp at which the baseline arrived and
+// advance from there, so the delta spans a few seconds at most and clock skew
+// between the browser and the Pi never enters the absolute value.
+let baseElapsed   = null;   // seconds, from the server
+let baseLocalMs   = null;   // performance.now() when it arrived
 let durationTimer = null;
 
 let connected = true;
 
-// ==================== 工具 ====================
+// ==================== helpers ====================
 function formatTime(ts) {
     const d = new Date(ts * 1000);
     const hh = String(d.getHours()).padStart(2, '0');
@@ -29,13 +30,13 @@ function formatDuration(seconds) {
 function formatDurationText(seconds) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) return `${h}小时${m}分钟`;
-    return `${m}分钟`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
 }
 
-// 统一的取数入口。任何一个接口失败都把页面切到断连态，
-// 而不是让某一块静默停止更新 —— 演示时页面看起来正常但数据是
-// 冻结的，比直接报错危险得多。
+// Single fetch entry point. Any endpoint failing puts the whole page into a
+// disconnected state rather than letting one section silently stop updating —
+// a page that looks live while showing frozen data is worse than an error.
 async function fetchJSON(url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
@@ -52,13 +53,13 @@ function setConnected(ok, reason) {
     if (ok) {
         banner.classList.add('hidden');
     } else {
-        banner.textContent = `与服务器连接中断${reason ? '：' + reason : ''}`;
+        banner.textContent = `Lost connection to the server${reason ? ': ' + reason : ''}`;
         banner.classList.remove('hidden');
-        stopDuration();   // 断连后不能继续走表，否则显示的是编造的时长
+        stopDuration();   // never keep counting against data we no longer have
     }
 }
 
-// ==================== 实时状态 ====================
+// ==================== live status ====================
 async function refreshRealtime() {
     let data;
     try {
@@ -69,40 +70,41 @@ async function refreshRealtime() {
         return;
     }
 
-    const box     = document.getElementById('spot-box');
-    const text    = document.getElementById('spot-text');
+    const box      = document.getElementById('spot-box');
+    const text     = document.getElementById('spot-text');
     const voteText = document.getElementById('vote-text');
-    const warning = document.getElementById('vote-warning');
+    const warning  = document.getElementById('vote-warning');
 
     if (data.occupied === 1) {
         box.className = 'spot-box occupied';
-        text.textContent = '占用中';
+        text.textContent = 'Occupied';
     } else {
         box.className = 'spot-box idle';
-        text.textContent = '空闲';
+        text.textContent = 'Vacant';
     }
 
-    // 网关停了或所有节点掉线时，表里最后一行还在，光看 occupied
-    // 分辨不出来。stale 由服务端按数据年龄给出。
+    // If the gateway dies the last fused row is still there, so `occupied`
+    // alone can't distinguish current state from frozen data. The server
+    // flags it based on row age.
     if (data.stale) {
         box.classList.add('stale');
-        text.textContent = '数据过期';
+        text.textContent = 'Stale data';
     }
 
     voteText.textContent = `${data.votes_occ}/${data.votes_total}`;
 
-    // 分母不足 3 表示有节点失联，投票已降级
+    // A denominator below 3 means a node dropped out and the vote is degraded.
     if (data.votes_total < 3) {
         box.classList.add('abnormal');
-        warning.textContent = '节点异常';
+        warning.textContent = 'Node down';
         warning.classList.remove('hidden');
     } else {
         box.classList.remove('abnormal');
         warning.classList.add('hidden');
     }
 
-    // 票数打平时网关保持上一状态，会出现 1/2 却显示占用。
-    // 不标出来会被当成算错了。
+    // On a tie the gateway holds the previous state, which produces a
+    // legitimate 1/2-while-occupied row. Label it or it reads as an error.
     const tieHint = document.getElementById('tie-hint');
     if (data.is_tie) {
         tieHint.classList.remove('hidden');
@@ -110,7 +112,6 @@ async function refreshRealtime() {
         tieHint.classList.add('hidden');
     }
 
-    // 已停时长
     if (data.elapsed !== null && data.elapsed !== undefined) {
         baseElapsed = data.elapsed;
         baseLocalMs = performance.now();
@@ -137,7 +138,7 @@ function stopDuration() {
     baseLocalMs = null;
 }
 
-// ==================== 历史时间轴 ====================
+// ==================== history timeline ====================
 async function refreshHistory() {
     let data;
     try {
@@ -163,8 +164,8 @@ function drawTimeline(points, windowStart, windowEnd, gapSec) {
     const COLOR_IDLE     = '#2ecc71';
     const COLOR_NODATA   = '#d5d8dc';
 
-    // 底色先铺成「无数据」。有采样的区间才会被覆盖掉，
-    // 所以网关没运行的时段自然显示为灰。
+    // Start from "no data" and let sampled intervals paint over it, so any
+    // period the gateway wasn't running shows up as a gap by default.
     ctx.fillStyle = COLOR_NODATA;
     ctx.fillRect(0, 0, w, h);
 
@@ -177,17 +178,18 @@ function drawTimeline(points, windowStart, windowEnd, gapSec) {
         const p    = points[i];
         const next = points[i + 1];
 
-        // 每个采样点代表它自己到下一个点之间的这段时间。
+        // Each sample represents the interval up to the next one.
         //
-        // 关键：间隔超过 gapSec 说明中间网关停了或全部节点掉线，
-        // 这段时间的状态是未知的。原来的写法会把整段涂成停机前
-        // 那一刻的颜色 —— 停机 3 小时就会在时间轴上凭空长出一条
-        // 3 小时的占用记录。
+        // The important case: a gap larger than gapSec means the gateway was
+        // down or every node was offline, and the state over that span is
+        // unknown. Filling it with the colour of the preceding sample would
+        // invent a parking event — a 20-minute outage rendered as 20 minutes
+        // of occupancy.
         let segEnd;
         if (next) {
             segEnd = (next.ts - p.ts > gapSec) ? p.ts + gapSec : next.ts;
         } else {
-            // 最后一个点：只画一个采样周期，之后留白表示还没有数据
+            // Last sample: paint one period and leave the rest blank.
             segEnd = Math.min(p.ts + gapSec, windowEnd);
         }
 
@@ -200,7 +202,7 @@ function drawTimeline(points, windowStart, windowEnd, gapSec) {
     }
 }
 
-// ==================== 会话列表 ====================
+// ==================== sessions ====================
 async function refreshSessions() {
     let data;
     try {
@@ -215,15 +217,15 @@ async function refreshSessions() {
     tbody.innerHTML = '';
 
     if (data.data.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty">窗口内没有停车记录</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No parking sessions in this window</td></tr>';
         return;
     }
 
     data.data.forEach((s, idx) => {
-        // 进行中的会话用服务端时间算时长，不用浏览器时钟
+        // Open sessions are measured against the server clock, not the browser's.
         const dur = s.ended_at
             ? formatDurationText(s.ended_at - s.started_at)
-            : formatDurationText(data.server_now - s.started_at) + '（进行中）';
+            : formatDurationText(data.server_now - s.started_at) + ' (ongoing)';
 
         const tr = document.createElement('tr');
         if (!s.ended_at) tr.className = 'active-session';
@@ -237,7 +239,7 @@ async function refreshSessions() {
     });
 }
 
-// ==================== 节点状态 ====================
+// ==================== node health ====================
 async function refreshNodes() {
     let data;
     try {
@@ -252,27 +254,27 @@ async function refreshNodes() {
     container.innerHTML = '';
 
     if (data.data.length === 0) {
-        container.innerHTML = '<div class="empty">还没有收到任何节点上报</div>';
+        container.innerHTML = '<div class="empty">No node reports received yet</div>';
         return;
     }
 
     data.data.forEach(node => {
         const div = document.createElement('div');
         div.className = `node-row ${node.status}`;
-        const statusText = node.status === 'online' ? '在线' : '离线';
-        const ageText = node.age === null ? '从未上报' : `${node.age} 秒前`;
+        const statusText = node.status === 'online' ? 'Online' : 'Offline';
+        const ageText = node.age === null ? 'never reported' : `${node.age}s ago`;
         div.innerHTML = `
             <div>
                 <strong>node${node.node_id}</strong>
                 <span class="node-status status-${node.status}">${statusText}</span>
             </div>
-            <div class="node-lastseen">最后上报：${formatTime(node.last_seen)}（${ageText}）</div>
+            <div class="node-lastseen">Last report: ${formatTime(node.last_seen)} (${ageText})</div>
         `;
         container.appendChild(div);
     });
 }
 
-// ==================== 初始化 ====================
+// ==================== init ====================
 async function refreshAll() {
     await Promise.allSettled([
         refreshRealtime(), refreshHistory(), refreshSessions(), refreshNodes(),
