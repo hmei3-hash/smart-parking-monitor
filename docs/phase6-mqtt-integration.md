@@ -166,8 +166,14 @@ boards from independent supplies rather than one hub, or adding bulk
 capacitance on 5 V, then re-running and counting `node_events`.
 
 **Classifier not validated in situ.** See 3.3. No `empty` observation exists
-in the production dataset yet, so the ~85% single-node / ~94% fused figures
-still come from the simulator and bench testing, not from this deployment.
+in the production dataset yet.
+
+The ~85% / ~94% figures quoted elsewhere are not measurements of the
+classifier at all. `node-sim` injects a fixed 15% per-node disagreement rate,
+so 85% is that parameter by construction and 94% is the arithmetic of a
+three-way majority vote over it — `3(0.85²)(0.15) + 0.85³ = 93.9%`. Matching
+that number confirms the vote logic is correct and nothing more. The CNN's own
+held-out INT8 accuracy is ~95%; its accuracy in deployment remains unmeasured.
 
 **No temporal debounce.** `architecture.md` assigns debounce to the gateway
 and it is not implemented. Tie hysteresis covers the two-node case, but with

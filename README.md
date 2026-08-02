@@ -5,7 +5,7 @@
 A distributed smart parking monitoring system built on **ESP32-S3-CAM**
 nodes with on-device INT8 TFLite Micro inference. Nodes publish JSON
 detection results over MQTT to a Raspberry Pi 5 gateway running
-Mosquitto, SQLite event logging, and a Flask dashboard. The gateway
+Mosquitto, SQLite persistence, and a FastAPI dashboard. The gateway
 performs majority-vote fusion across nodes. All vision compute runs on
 the edge — the gateway never does inference.
 
@@ -22,8 +22,8 @@ Edge Layer ─────── 3× ESP32-S3-CAM
 Gateway Layer ──── Raspberry Pi 5
                    ├── Mosquitto broker
                    ├── Majority-vote decision fusion
-                   ├── SQLite event log
-                   └── Flask web dashboard
+                   ├── SQLite persistence (readings, fused, sessions, nodes)
+                   └── FastAPI dashboard (read-only on the same database)
 ```
 
 ## Current Status
@@ -35,15 +35,31 @@ Gateway Layer ──── Raspberry Pi 5
 | 3 | Data collection (205 images: ~100 occupied, ~100 empty) | Complete |
 | 4 | Model training and INT8 quantization | Complete |
 | 5 | [On-device TFLite Micro deployment](docs/phase5-tflite-deployment.md) | Complete |
-| 6 | [Three nodes + gateway fusion + persistence](docs/phase6-mqtt-integration.md) | Embedded complete; dashboard in development |
+| 6 | [Three nodes + gateway fusion + persistence](docs/phase6-mqtt-integration.md) | Code complete; hardware issues open |
 | 7 | FreeRTOS task architecture (dual-core, semaphore, queue) | Not started |
 | 8 | Final documentation | Not started |
 
 Phase 6 runs end to end: three nodes publish inference results over MQTT, the
-gateway votes and writes to SQLite, and parking sessions are derived from the
-fused state. The first full-system run also surfaced publish loss of up to
-39% and correlated node reboots that are not yet resolved — measurements and
-analysis in [docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
+gateway votes and writes to SQLite, parking sessions are derived from the
+fused state, and the dashboard reads that database. The first full-system run
+also surfaced publish loss of up to 39% and correlated node reboots that are
+not yet resolved — measurements and analysis in
+[docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
+
+**Known open items**, tracked so the status above isn't read as more finished
+than it is:
+
+- Node reboots and publish loss are unresolved. Two boards rebooted within
+  14 seconds of each other after ~18 minutes of uptime each, which points at
+  shared supply sag rather than firmware.
+- The classifier has not been validated in situ. Every reading in the first
+  run was `occupied=1`, so the inter-node agreement figure from that run
+  carries no information — three nodes agreeing on a constant proves nothing.
+- The gateway has no temporal debounce yet, although
+  `gateway/tools/gen_sample_db.py` models one. Live sessions are therefore
+  noisier than the sample data suggests.
+- Firmware and dashboard have each been verified against the schema, but the
+  full chain has not yet been exercised on real hardware in one run.
 
 ## Edge AI Model
 
@@ -94,9 +110,19 @@ bug remained open.
   instead of stalling it. Sliding-window rather than sequence-aligned because
   real nodes publish on independent timers and never share sequence numbers.
 
-**Measured accuracy: a single node classifies correctly ~85% of the time;
-the three-node majority vote reaches ~94%.** That gain is the reason for the
-multi-node architecture.
+**On the accuracy numbers.** The simulator injects a fixed 15% disagreement
+rate per node (`DISAGREE_PCT`), so a single simulated node is correct 85% of
+the time by construction and the three-node majority vote lands at 94% —
+`3(0.85²)(0.15) + 0.85³ = 93.9%`, which the measured result matches. That
+confirms the vote logic is implemented correctly, but it says nothing about
+the real classifier: the numbers are a design parameter and its arithmetic
+consequence, not a measurement of the CNN.
+
+The CNN scores ~95% on the held-out INT8 test set. Its accuracy **in
+deployment is still unmeasured** — every reading in the first full-system run
+was `occupied`, so that run contains no evidence either way. Measuring it
+requires a run with the spot empty, which is blocked on the node stability
+issues above.
 
 ### MQTT Topics
 
@@ -108,18 +134,37 @@ parking/status/node{M}     node online/offline — retained, set via MQTT Last W
 
 ### Dashboard Data Contract
 
-`gateway/schema.sql` defines the SQLite persistence layer, and
-`gateway/tools/gen_sample_db.py` generates 12 hours of synthetic history so the
-dashboard can be developed in parallel against a realistic database. The
-dashboard itself is a teammate's scope and is in active development; this repo
-defines only the data contract. See
-[docs/dashboard_requirements.md](docs/dashboard_requirements.md) for the field
-reference and UI requirements.
+The SQLite database is the only interface between the gateway and the
+dashboard. There is no shared code and no API between them: `fusion.py` writes
+through `gateway/db.py`, and `dashboard/` opens the same file read-only. WAL is
+enabled, so dashboard reads never block gateway writes.
 
-`fusion.py` writes live results through `gateway/db.py`, which also derives
-parking sessions from fused state transitions. The database is opened
-read-only from the dashboard side and WAL is enabled, so dashboard reads never
-block gateway writes.
+Defining that boundary up front is what let the dashboard be built in parallel
+with hardware that was still unstable:
+
+- **[`gateway/schema.sql`](gateway/schema.sql)** — table definitions, treated
+  as a contract. Columns are added, never renamed or removed.
+- **[`gateway/tools/gen_sample_db.py`](gateway/tools/gen_sample_db.py)** —
+  generates 12 hours of synthetic history structurally identical to what
+  `fusion.py` writes, including node dropout and split votes, so the dashboard
+  can be developed and demoed without access to the Raspberry Pi.
+- **[`docs/dashboard_requirements.md`](docs/dashboard_requirements.md)** — UI
+  requirements plus a field-by-field mapping from each requirement to the table
+  that satisfies it.
+
+Two coupling points are easy to get wrong and are documented on both sides:
+
+**`dashboard/config.py: OFFLINE_THRESHOLD` must equal `gateway/fusion.py:
+STALE_SEC`.** Both answer the same question — how long before a node's report
+stops counting. If they disagree, a node can be excluded from the dashboard's
+online list while still being counted in `votes_total`, and the page shows two
+nodes online alongside a 3/3 vote.
+
+**A tied vote holds the previous state rather than resolving to empty.** Ties
+are only reachable with two live nodes, which the demo deliberately induces by
+unplugging one. So `votes_occ=1, votes_total=2, occupied=1` is a legitimate
+row, and the dashboard labels it rather than rendering an apparent minority
+vote.
 
 ## Phase 6 — Multi-Node Integration
 
@@ -156,18 +201,28 @@ python3 gateway/inspect_db.py --watch
 ## Gateway Features
 
 - **Mosquitto MQTT broker** — central message bus
-- **Majority-vote decision fusion** — 2 of 3 nodes agree = final decision
-- **MQTT Last Will & Testament** — automatic node disconnect detection
-- **SQLite event logging** — persistent occupancy history
-- **Flask web dashboard** — real-time parking status
-- **Timeout alert / violation flagging**
+- **Sliding-window majority vote** — each node's latest reading is kept and
+  readings older than `STALE_SEC` are dropped, so a dead node degrades the
+  vote from 3 to 2 instead of stalling it
+- **Tie hysteresis** — an even split holds the previous state, since a tie is
+  absence of new information rather than a vote for empty
+- **MQTT Last Will** — node disconnect detection, though `last_seen` is
+  treated as authoritative because a node that loses WiFi without a clean TCP
+  close stays "online" until the broker keepalive expires
+- **SQLite persistence** — raw readings, fused results, derived parking
+  sessions, and node health; sessions survive a gateway restart
+- **FastAPI dashboard** — real-time status, 10-hour history, node health
+- **`inspect_db.py`** — read-only console view, safe to run against a live
+  gateway
+
+Not yet implemented: temporal debounce, timeout alerts, violation flagging.
 
 ## Hardware BOM
 
 | Component | Qty | Notes |
 |-----------|-----|-------|
 | ESP32-S3-CAM (N16R8) | 3 | Edge inference nodes |
-| Raspberry Pi 5 | 1 | Gateway (Mosquitto, SQLite, Flask) |
+| Raspberry Pi 5 | 1 | Gateway (Mosquitto, SQLite, FastAPI) |
 | USB cables | 3 | Power + serial |
 | LED + 220 Ω resistor | 3 | Alarm indicator |
 | Breadboard + jumpers | — | Prototyping |
@@ -183,6 +238,7 @@ FSR pressure sensors are deferred to stretch goals.
 | `model/` | [Model artifacts](model/README.md) | Training scripts, INT8 quantized model, dataset notes |
 | `node-sim/` | Simulated nodes | Three MQTT publishers with no inference, for gateway bring-up |
 | `gateway/` | [Gateway server](gateway/README.md) | Fusion, SQLite persistence, sample-data generator |
+| `dashboard/` | [Web dashboard](dashboard/README.md) | FastAPI + vanilla JS, read-only on the gateway database |
 | `docs/` | Documentation | Setup guides, deployment notes, phase write-ups |
 
 ## Build & Flash
@@ -204,9 +260,27 @@ pio run -t upload
 ```bash
 # Gateway, on the Raspberry Pi
 cd gateway
-pip3 install paho-mqtt
-python3 fusion.py                 # subscribes, votes, writes parking.db
-python3 inspect_db.py --watch     # read-only live view, separate shell
+pip3 install paho-mqtt --break-system-packages       # PEP 668 on Bookworm
+python3 fusion.py /home/pi/parking/parking.db        # subscribe, vote, persist
+python3 inspect_db.py --watch                        # read-only live view
+```
+
+```bash
+# Dashboard, same Pi, separate service
+cd dashboard
+pip3 install fastapi uvicorn --break-system-packages
+PARKING_DB=/home/pi/parking/parking.db python3 main.py
+```
+
+Both processes must run as the same user. Reading a WAL database requires
+access to the `-shm` index, so a mismatch fails with
+`unable to open database file` even when the main file is world-readable.
+
+To develop the dashboard without hardware:
+
+```bash
+python3 gateway/tools/gen_sample_db.py               # 12 h of synthetic history
+PARKING_DB=./parking_sample.db python3 dashboard/main.py
 ```
 
 ## Milestones — MVP
@@ -218,8 +292,11 @@ python3 inspect_db.py --watch     # read-only live view, separate shell
 - [x] Single node edge inference
 - [x] Three nodes with gateway decision fusion
 - [x] SQLite persistence and session tracking
-- [ ] Dashboard (teammate — in development)
+- [x] Dashboard reading the gateway database
 - [ ] Resolve node supply stability / publish loss
+- [ ] Validate the classifier in situ (no `empty` observation recorded yet)
+- [ ] Temporal debounce on the gateway
+- [ ] Full-chain integration run on real hardware
 - [ ] FreeRTOS dual-core task architecture
 
 ## Stretch Goals
