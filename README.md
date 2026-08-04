@@ -15,19 +15,16 @@ the edge — the gateway never does inference.
 ---
 
 ## Architecture
-
-```
 Edge Layer ─────── 3× ESP32-S3-CAM
-                   (camera + TFLite INT8 inference + MQTT publish)
-       │
-       │  WiFi / MQTT (JSON only)
-       ▼
+(camera + TFLite INT8 inference + MQTT publish)
+│
+│ WiFi / MQTT (JSON only)
+▼
 Gateway Layer ──── Raspberry Pi 5
-                   ├── Mosquitto broker
-                   ├── Majority-vote decision fusion
-                   ├── SQLite persistence (readings, fused, sessions, nodes)
-                   └── FastAPI dashboard (read-only on the same database)
-```
+├── Mosquitto broker
+├── Majority-vote decision fusion
+├── SQLite persistence (readings, fused, sessions, nodes)
+└── FastAPI dashboard (read-only on the same database)
 
 ## Current Status
 
@@ -38,31 +35,42 @@ Gateway Layer ──── Raspberry Pi 5
 | 3 | Data collection (205 images: ~100 occupied, ~100 empty) | Complete |
 | 4 | Model training and INT8 quantization | Complete |
 | 5 | [On-device TFLite Micro deployment](docs/phase5-tflite-deployment.md) | Complete |
-| 6 | [Three nodes + gateway fusion + persistence](docs/phase6-mqtt-integration.md) | Code complete; hardware issues open |
+| 6 | [Three nodes + gateway fusion + persistence](docs/phase6-mqtt-integration.md) | Complete; long-run stability open |
 | 7 | FreeRTOS task architecture (dual-core, semaphore, queue) | Not started |
 | 8 | Final documentation | Not started |
 
-Phase 6 runs end to end: three nodes publish inference results over MQTT, the
-gateway votes and writes to SQLite, parking sessions are derived from the
-fused state, and the dashboard reads that database. The first full-system run
-also surfaced publish loss of up to 39% and correlated node reboots that are
-not yet resolved — measurements and analysis in
-[docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
+**Verified on hardware** — see the demo video above. A full-chain run exercises
+three nodes publishing inference results, majority-vote fusion on the gateway,
+SQLite persistence, session derivation from fused state, and the dashboard
+reading that database. Both `empty` and `occupied` states are reached during
+the run, so the classifier does discriminate in deployment rather than pinning
+to a constant as it did in the first attempt.
 
-**Known open items**, tracked so the status above isn't read as more finished
-than it is:
+**Open items**, tracked so the status above isn't read as more finished than
+it is:
 
-- Node reboots and publish loss are unresolved. Two boards rebooted within
-  14 seconds of each other after ~18 minutes of uptime each, which points at
-  shared supply sag rather than firmware.
-- The classifier has not been validated in situ. Every reading in the first
-  run was `occupied=1`, so the inter-node agreement figure from that run
-  carries no information — three nodes agreeing on a constant proves nothing.
-- The gateway has no temporal debounce yet, although
+- **Long-run stability is unverified.** The demo run is under 10 minutes. The
+  earlier failure — two boards rebooting within 14 seconds of each other after
+  ~18 minutes of uptime each, pointing at shared supply sag — has not been
+  reproduced *or* ruled out, because no run since has been long enough to
+  reach that point. Uptime beyond ~20 minutes should be treated as untested.
+- **Publish loss is still the 39% figure.** Loss has not been re-measured
+  since the run documented in
+  [docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md), so the
+  per-node numbers there (0% / 23% / 39%) remain the current best estimate.
+  Whether the demo run improved on them is unknown.
+- **Classifier accuracy in deployment is qualitative only.** The demo shows
+  correct transitions in both directions, which the earlier run could not.
+  It is not a measured accuracy: no labelled empty/occupied trial set has been
+  run against gateway output, so there is no in-situ confusion matrix and no
+  false-positive or false-negative rate.
+- **No temporal debounce on the gateway**, although
   `gateway/tools/gen_sample_db.py` models one. Live sessions are therefore
   noisier than the sample data suggests.
-- Firmware and dashboard have each been verified against the schema, but the
-  full chain has not yet been exercised on real hardware in one run.
+- **No runtime resource measurements.** Per-task stack high-water marks, heap
+  headroom, and CPU utilisation during inference are unmeasured. These are
+  needed as a baseline before the Phase 7 task restructure, since without a
+  "before" the restructure cannot be shown to have improved anything.
 
 ## Edge AI Model
 
@@ -79,12 +87,21 @@ than it is:
 
 **ML pipeline:** collect from CAM stream → train in Jupyter → INT8 quantize → export C header → compile into firmware
 
+**On the 95% held-out figure.** It is optimistic. Images were burst-captured
+and then split randomly, so near-duplicate frames from the same burst appear
+in both the training and validation sets — the model is scored partly on
+frames it has effectively seen. The planned fix is per-session capture with
+`GroupShuffleSplit`, so that no session spans the split. Until then, treat 95%
+as an upper bound rather than an estimate.
+
 ## Phase 5 — On-Device Inference
 
 TFLite Micro deployed on ESP32-S3. 96×96×3 INT8 CNN, 13.8 KB model in flash,
 120 KB tensor arena in SRAM, 4.15 s inference, ~14 s worst-case observation
-latency. Decision logic (temporal debounce, multi-node vote) is deferred to
-the Raspberry Pi gateway; the node publishes raw observations only.
+latency. Inference is deliberately unoptimised: parking occupancy changes on a
+timescale of minutes, so seconds of latency cost nothing, and reference kernels
+keep the build simple. Decision logic (temporal debounce, multi-node vote) is
+deferred to the Raspberry Pi gateway; the node publishes raw observations only.
 
 Two root causes were found and fixed during bring-up: a board-level
 flash/PSRAM misconfiguration causing a boot loop, and a train/serve brightness
@@ -113,27 +130,21 @@ bug remained open.
   instead of stalling it. Sliding-window rather than sequence-aligned because
   real nodes publish on independent timers and never share sequence numbers.
 
-**On the accuracy numbers.** The simulator injects a fixed 15% disagreement
-rate per node (`DISAGREE_PCT`), so a single simulated node is correct 85% of
-the time by construction and the three-node majority vote lands at 94% —
-`3(0.85²)(0.15) + 0.85³ = 93.9%`, which the measured result matches. That
-confirms the vote logic is implemented correctly, but it says nothing about
-the real classifier: the numbers are a design parameter and its arithmetic
-consequence, not a measurement of the CNN.
+**On the simulated accuracy numbers.** The simulator injects a fixed 15%
+disagreement rate per node (`DISAGREE_PCT`), so a single simulated node is
+correct 85% of the time by construction and the three-node majority vote lands
+at 94% — `3(0.85²)(0.15) + 0.85³ = 93.9%`, which the measured result matches.
+That confirms the vote logic is implemented correctly, but it says nothing
+about the real classifier: the numbers are a design parameter and its
+arithmetic consequence, not a measurement of the CNN.
 
-The CNN scores ~95% on the held-out INT8 test set. Its accuracy **in
-deployment is still unmeasured** — every reading in the first full-system run
-was `occupied`, so that run contains no evidence either way. Measuring it
-requires a run with the spot empty, which is blocked on the node stability
-issues above.
+Real-classifier accuracy in deployment remains unquantified — see open items
+above.
 
 ### MQTT Topics
-
-```
-parking/spot{N}/node{M}    node occupancy reports (JSON)
-parking/spot{N}/fused      fusion result for the spot
-parking/status/node{M}     node online/offline — retained, set via MQTT Last Will
-```
+parking/spot{N}/node{M} node occupancy reports (JSON)
+parking/spot{N}/fused fusion result for the spot
+parking/status/node{M} node online/offline — retained, set via MQTT Last Will
 
 ### Dashboard Data Contract
 
@@ -183,8 +194,10 @@ misread on one survivor cut one parking session into two.
 The first full-system run worked end to end and produced measurements worth
 more than the passing result: up to 39% publish loss, and node2/node3
 rebooting within 14 seconds of each other after ~18 minutes of uptime, which
-points at shared supply sag rather than firmware. Both are open. Full analysis
-in [docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
+points at shared supply sag rather than firmware. The demo run since then
+exercises the full chain in both occupancy states, but is too short to bear on
+either issue. Both remain open. Full analysis in
+[docs/phase6-mqtt-integration.md](docs/phase6-mqtt-integration.md).
 
 Inspect a live or sample database with:
 
@@ -200,6 +213,9 @@ python3 gateway/inspect_db.py --watch
 | 1 | MQTT publish + status heartbeat (timer) | Queue consumer |
 
 **Synchronization:** FreeRTOS queue for detection results between cores. No shared globals between cores.
+
+Baseline resource measurements are a prerequisite for this phase — see open
+items.
 
 ## Gateway Features
 
@@ -296,10 +312,12 @@ PARKING_DB=./parking_sample.db python3 dashboard/main.py
 - [x] Three nodes with gateway decision fusion
 - [x] SQLite persistence and session tracking
 - [x] Dashboard reading the gateway database
-- [ ] Resolve node supply stability / publish loss
-- [ ] Validate the classifier in situ (no `empty` observation recorded yet)
+- [x] Full-chain integration run on real hardware, both occupancy states
+- [ ] Resolve node supply stability (no run past ~20 min since the reboot issue)
+- [ ] Re-measure publish loss
+- [ ] Quantify classifier accuracy in situ (labelled trial set → confusion matrix)
+- [ ] Baseline runtime resource measurements (stack, heap, CPU)
 - [ ] Temporal debounce on the gateway
-- [ ] Full-chain integration run on real hardware
 - [ ] FreeRTOS dual-core task architecture
 
 ## Stretch Goals
