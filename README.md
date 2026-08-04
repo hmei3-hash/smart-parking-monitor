@@ -2,6 +2,9 @@
 
 **Author:** Hongyi Mei
 
+**[▶ Demo video](https://youtu.be/OTSbgnwH_kA)** — three nodes, gateway fusion,
+and dashboard running end to end on hardware.
+
 A distributed smart parking monitoring system built on **ESP32-S3-CAM**
 nodes with on-device INT8 TFLite Micro inference. Nodes publish JSON
 detection results over MQTT to a Raspberry Pi 5 gateway running
